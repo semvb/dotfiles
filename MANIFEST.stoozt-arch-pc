@@ -1,0 +1,3 @@
+# Desktop-only links. Rename this file to MANIFEST.<output of `hostname -s`>.
+config/i3/hosts/desktop.conf    -> .config/i3/host.conf
+config/i3/i3blocks/desktop.conf -> .config/i3/i3blocks.conf

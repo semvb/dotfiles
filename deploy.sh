@@ -12,6 +12,9 @@
 #   .zshrc                      repo/.zshrc       -> ~/.zshrc
 #   nvim -> .config/nvim        repo/nvim         -> ~/.config/nvim
 #
+# After MANIFEST, MANIFEST.<hostname> is applied too (if it exists), for
+# per-machine files. Override the name with DOTFILES_HOST=<name>.
+#
 # Existing files at a destination are never deleted: they are moved into
 # ~/.dotfiles_backup/<timestamp>/ before the symlink is created.
 
@@ -21,6 +24,8 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$DOTFILES/MANIFEST"
 BACKUP_DIR="$HOME/.dotfiles_backup/$(date +%Y%m%d-%H%M%S)"
 DRY_RUN=0
+# Which MANIFEST.<host> to use. Override with DOTFILES_HOST=desktop ./deploy.sh
+HOST="${DOTFILES_HOST:-$(cat /etc/hostname 2>/dev/null)}"
 
 info()  { printf '\033[32m[OK]\033[0m    %s\n' "$*"; }
 skip()  { printf '\033[90m[SKIP]\033[0m  %s\n' "$*"; }
@@ -61,6 +66,19 @@ link() {
 deploy() {
     [[ -f "$MANIFEST" ]] || { err "no MANIFEST found at $MANIFEST"; exit 1; }
 
+    deploy_manifest "$MANIFEST"
+
+    # Machine-specific extras: MANIFEST.<hostname>, e.g. MANIFEST.laptop
+    local host_manifest="$MANIFEST.$HOST"
+    if [[ -f "$host_manifest" ]]; then
+        echo "--- host-specific entries from $(basename "$host_manifest")"
+        deploy_manifest "$host_manifest"
+    else
+        skip "no $(basename "$host_manifest") for this machine"
+    fi
+}
+
+deploy_manifest() {
     local line src dest
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="$(trim "${line%%#*}")"          # strip comments + whitespace
@@ -76,7 +94,7 @@ deploy() {
         dest="${dest#\~/}"                    # allow "~/.config/x" as well
 
         link "$src" "$dest"
-    done < "$MANIFEST"
+    done < "$1"
 }
 
 # add <existing path under $HOME>
@@ -115,7 +133,7 @@ main() {
     case "${1:-}" in
         add)        shift; add "$@" ;;
         ""|deploy)  deploy ;;
-        -h|--help)  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+        -h|--help)  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
         *)          err "unknown command: $1"; exit 1 ;;
     esac
 }

@@ -9,10 +9,14 @@ config/emacs/init.el   -> .config/emacs/init.el
 config/emacs/.emacs.rc -> .config/emacs/.emacs.rc
 config/emacs/lisp      -> .config/emacs/lisp
 
-config/i3              -> .config/i3
+config/i3/config       -> .config/i3/config
+config/i3/scripts      -> .config/i3/scripts
+
 
 config/kitty           -> .config/kitty
 
 config/rofi            -> .config/rofi
 
 .bashrc
+config/emacs/custom.el -> .config/emacs/custom.el
+.bash_aliases

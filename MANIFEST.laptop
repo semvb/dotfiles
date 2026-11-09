@@ -1,0 +1,3 @@
+# Laptop-only links. Rename this file to MANIFEST.<output of `hostname -s`>.
+config/i3/hosts/laptop.conf    -> .config/i3/host.conf
+config/i3/i3blocks/laptop.conf -> .config/i3/i3blocks.conf

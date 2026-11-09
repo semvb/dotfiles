@@ -1,0 +1,7 @@
+alias ssh_pi='ssh stoozt@stoozt-pi5.local'
+alias ls='ls --color=auto'
+alias ll='ls -lhAF'
+alias la='ls -hAF'
+alias l='ls -CF'
+alias cl='clear'
+alias grep='grep --color=auto'
