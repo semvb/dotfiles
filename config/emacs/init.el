@@ -307,6 +307,8 @@
 ;; Rascal
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 (require 'rascal)
+(when (string= (system-name) "stoozt-arch-pc")
+  (setq rascal-java-program "/usr/lib/jvm/java-11-temurin/bin/java"))
 (setq rascal-jar-directory "~/.local/share/rascal/")
 
 

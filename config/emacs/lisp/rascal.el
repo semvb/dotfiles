@@ -33,6 +33,7 @@
 (require 'eglot)
 (require 'project)
 (require 'term)
+(require 'seq)
 (declare-function eat-make "eat")
 (declare-function eat-semi-char-mode "eat")
 (declare-function eat-term-send-string "eat")
@@ -105,9 +106,38 @@
     ("\\_<\\(?:syntax\\|lexical\\|layout\\|keyword\\|data\\|alias\\)\\s-+\\([[:alnum:]_]+\\)"
      1 font-lock-type-face)
     ("\\_<\\([[:alpha:]_][[:alnum:]_]*\\)\\s-*(" 1 font-lock-function-name-face)
-    ("@[[:alnum:]_]+" . font-lock-preprocessor-face)
-    ("|[^|\n]*|" . font-lock-string-face))
-  "Fallback highlighting; the language server adds semantic highlighting on top.")
+    ("@[[:alnum:]_]+" . font-lock-preprocessor-face))
+  "Fallback highlighting; the language server adds semantic highlighting on top.
+Location literals |...| and regex literals /.../ are highlighted as
+strings by `rascal-syntax-propertize'.")
+
+;; Location literals (|project://x/|) and regex literals (/a*b/) contain
+;; characters the syntax table would misread: "//" starts a comment and a
+;; quote starts a string.  Marking their delimiters as string fences makes
+;; Emacs treat each literal as one string.
+(defconst rascal--literal-re
+  (concat
+   ;; Group 1: a location, |scheme:/...|
+   "\\(|[[:alpha:]][[:alnum:]+.-]*:/[^|\n]*|\\)"
+   "\\|"
+   ;; Group 2: a regex, /.../, after ( , = : ! { [ & | ? or `case'/`return'.
+   ;; A division never follows those; "//" and "/*" start comments.
+   "\\(?:[(,=:!{[&|?]\\|\\_<\\(?:case\\|return\\)\\)[ \t]*"
+   "\\(/\\(?:[^/*\\\n]\\|\\\\.\\)\\(?:[^/\\\n]\\|\\\\.\\)*/\\)")
+  "Matches a Rascal location literal (group 1) or regex literal (group 2).")
+
+(defun rascal-syntax-propertize (start end)
+  "Mark location and regex literals between START and END as strings."
+  (goto-char start)
+  (while (re-search-forward rascal--literal-re end t)
+    (let ((beg (or (match-beginning 1) (match-beginning 2)))
+          (stop (or (match-end 1) (match-end 2))))
+      (if (nth 8 (save-excursion (syntax-ppss beg)))
+          ;; Already inside a comment or string: not a literal.
+          (goto-char (1+ beg))
+        (put-text-property beg (1+ beg) 'syntax-table (string-to-syntax "|"))
+        (put-text-property (1- stop) stop 'syntax-table (string-to-syntax "|"))
+        (goto-char stop)))))
 
 (defvar rascal-mode-syntax-table
   (let ((st (make-syntax-table)))
@@ -151,6 +181,7 @@
   (setq-local comment-end "")
   (setq-local comment-start-skip "//+\\s-*")
   (setq-local font-lock-defaults '(rascal-font-lock-keywords))
+  (setq-local syntax-propertize-function #'rascal-syntax-propertize)
   (setq-local indent-line-function #'rascal-indent-line)
   (setq-local electric-indent-chars (append "{}()" electric-indent-chars)))
 
@@ -242,20 +273,65 @@ Emacs commands (C-x o, C-x b, ...) and C-x C-j switches to line mode."
       (eat-term-send-string eat-terminal string)
     (term-send-raw-string string)))
 
-(defun rascal-repl ()
-  "Open (or switch to) a Rascal REPL for the current project.
-Started in the project root, so the REPL picks up the project's
-pom.xml / RASCAL.MF just like the VS Code \"Rascal terminal\"."
-  (interactive)
-  (let* ((root (rascal--project-root))
-         (name (rascal--repl-buffer-name root))
-         (buf (get-buffer (concat "*" name "*"))))
-    (unless (and buf (get-buffer-process buf))
-      (when buf (kill-buffer buf))
-      (let ((default-directory root))
-        (setq buf (rascal--repl-start name))))
-    (pop-to-buffer buf)
-    buf))
+;;;;; Workspace folders: |project://NAME/| for folders other than the project
+
+(defcustom rascal-repl-workspace-folders nil
+  "Folders the REPL makes available as |project://NAME/|.
+This is the Emacs version of adding folders to the VS Code workspace.
+Each entry is either a folder, which gets its own name as NAME, or a
+cons (NAME . FOLDER) to choose the name.  Relative folders are relative
+to the Rascal project root.  Best set per project in a .dir-locals.el
+file in the project root, for example:
+
+  ((rascal-mode . ((rascal-repl-workspace-folders
+                    . ((\"smallsql\" . \"smallsql0.21_src\")
+                       \"hsqldb-2.3.1\")))))
+
+The folder contents are indexed when the REPL starts, so for files
+added later, start a new REPL."
+  :type '(repeat (choice directory (cons string directory)))
+  :safe (lambda (v)
+          (and (listp v)
+               (seq-every-p (lambda (e)
+                              (or (stringp e)
+                                  (and (consp e) (stringp (car e))
+                                       (stringp (cdr e)))))
+                            v))))
+
+;; The plain REPL only knows |project://| for its own project.  These
+;; helpers map every file and folder under a physical folder to
+;; |project://NAME/...| with IO::registerLocations.  That does exact
+;; lookups, so each path gets its own entry (folders with and without a
+;; trailing slash).
+(defconst rascal--repl-register-helpers
+  '("import IO;"
+    "map[loc,loc] rascalElWalk(loc p, loc l) { map[loc,loc] m = (l : p); if (isDirectory(p)) { m[l[path = l.path + \"/\"]] = p; for (str e <- listEntries(p)) m += rascalElWalk(p + e, l + e); } return m; }"
+    "void rascalElRegister(str name, loc root) { map[loc,loc] m = rascalElWalk(root, |project://<name>/|); m[|project://<name>|] = root; registerLocations(\"project\", name, m); }")
+  "Rascal definitions sent to the REPL, one command per line.")
+
+(defun rascal--file-loc (dir)
+  "Rascal |file:///...| literal for directory DIR."
+  (format "|file://%s|"
+          (replace-regexp-in-string
+           " " "%20" (directory-file-name (expand-file-name dir)) t t)))
+
+(defun rascal--repl-register-folders (root folders)
+  "In the current REPL buffer, register FOLDERS (relative to ROOT)."
+  (when folders
+    (dolist (line rascal--repl-register-helpers)
+      (rascal--repl-send (concat line "\r")))
+    (dolist (entry folders)
+      (let* ((dir (expand-file-name (if (consp entry) (cdr entry) entry) root))
+             (name (if (consp entry)
+                       (car entry)
+                     (file-name-nondirectory (directory-file-name dir)))))
+        (if (not (file-directory-p dir))
+            (message "Rascal: workspace folder %s does not exist" dir)
+          (rascal--repl-send
+           (format "rascalElRegister(\"%s\", %s);\r"
+                   name (rascal--file-loc dir))))))))
+
+;;;;; Starting the REPL
 
 ;; Wait for the first prompt so a just-started REPL doesn't drop our input.
 (defun rascal--wait-for-prompt (&optional timeout)
@@ -267,6 +343,28 @@ pom.xml / RASCAL.MF just like the VS Code \"Rascal terminal\"."
                        (goto-char (point-min))
                        (search-forward "rascal>" nil t))))
       (accept-process-output proc 0.2))))
+
+(defun rascal-repl ()
+  "Open (or switch to) a Rascal REPL for the current project.
+Started in the project root, so the REPL picks up the project's
+pom.xml / RASCAL.MF just like the VS Code \"Rascal terminal\".
+Folders in `rascal-repl-workspace-folders' become |project://NAME/|."
+  (interactive)
+  (let* ((root (rascal--project-root))
+         (folders rascal-repl-workspace-folders) ; read before switching buffer
+         (name (rascal--repl-buffer-name root))
+         (buf (get-buffer (concat "*" name "*"))))
+    (unless (and buf (get-buffer-process buf))
+      (when buf (kill-buffer buf))
+      (let ((default-directory root))
+        (setq buf (rascal--repl-start name)))
+      (when folders
+        (with-current-buffer buf
+          (message "Rascal: starting REPL and registering workspace folders...")
+          (rascal--wait-for-prompt)
+          (rascal--repl-register-folders root folders))))
+    (pop-to-buffer buf)
+    buf))
 
 (defun rascal--current-module ()
   (save-excursion
