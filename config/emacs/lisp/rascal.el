@@ -190,18 +190,54 @@ strings by `rascal-syntax-propertize'.")
 
 ;;;; Language server (Eglot)
 
+(defconst rascal--fallback-resolver-class
+  "org.rascalmpl.vscode.lsp.uri.FallbackResolver"
+  "Class that older rascal-lsp versions (e.g. 0.13.x) must be told about.")
+
+(defvar rascal--fallback-resolver-cache nil
+  "Cons (JAR-MTIME . BOOL): whether rascal-lsp.jar has the fallback resolver.")
+
+(defun rascal--jar-has-fallback-resolver-p (jar)
+  "Non-nil if JAR contains `rascal--fallback-resolver-class'.
+Zip files store entry names uncompressed, so a plain byte search works."
+  (let ((mtime (file-attribute-modification-time (file-attributes jar))))
+    (unless (equal (car rascal--fallback-resolver-cache) mtime)
+      (setq rascal--fallback-resolver-cache
+            (cons mtime
+                  (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (insert-file-contents-literally jar)
+                    (and (search-forward
+                          (concat (subst-char-in-string
+                                   ?. ?/ rascal--fallback-resolver-class)
+                                  ".class")
+                          nil t)
+                         t)))))
+    (cdr rascal--fallback-resolver-cache)))
+
 (defun rascal--server-command (&optional _interactive)
   "Command line that starts the Rascal language server over stdio.
 Mirrors what the VS Code extension runs."
-  (let ((cp (rascal--classpath)))
-    (list rascal-java-program
-          "-Dlog4j2.configurationFactory=org.rascalmpl.vscode.lsp.log.LogJsonConfiguration"
-          (concat "-Dlog4j2.level=" rascal-lsp-log-level)
-          "-Drascal.lsp.deploy=true"
-          (concat "-Drascal.compilerClasspath=" cp)
-          (concat "-Xmx" rascal-lsp-max-heap)
-          "-cp" cp
-          "org.rascalmpl.vscode.lsp.rascal.RascalLanguageServer")))
+  (let ((cp (rascal--classpath))
+        (lsp-jar (rascal--jar "rascal-lsp.jar")))
+    (append
+     (list rascal-java-program
+           "-Dlog4j2.configurationFactory=org.rascalmpl.vscode.lsp.log.LogJsonConfiguration"
+           (concat "-Dlog4j2.level=" rascal-lsp-log-level)
+           "-Drascal.lsp.deploy=true"
+           ;; Rascal reads its own library modules from the jar with Java's
+           ;; default charset.  On Java < 18 that follows the locale; without
+           ;; a UTF-8 locale the Rascal grammar fails to load and every
+           ;; module depending on it reports "Undeclared ..." errors.
+           "-Dfile.encoding=UTF-8")
+     ;; Versions that ship this class (e.g. 0.13.5) crash at startup
+     ;; without the flag; newer versions removed it and must not get it.
+     (when (rascal--jar-has-fallback-resolver-p lsp-jar)
+       (list (concat "-Drascal.fallbackResolver=" rascal--fallback-resolver-class)))
+     (list (concat "-Drascal.compilerClasspath=" cp)
+           (concat "-Xmx" rascal-lsp-max-heap)
+           "-cp" cp
+           "org.rascalmpl.vscode.lsp.rascal.RascalLanguageServer"))))
 
 (add-to-list 'eglot-server-programs '(rascal-mode . rascal--server-command))
 
