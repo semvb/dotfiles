@@ -12,3 +12,11 @@
     (forward-char column)))
 
 (global-set-key (kbd "C-,") 'rc/duplicate-line)
+
+(defun rc/rgrep-selected (beg end)
+  (interactive (if (use-region-p)
+                   (list (region-beginning) (region-end))
+                 (list (point-min) (point-min))))
+  (rgrep (buffer-substring-no-properties beg end) "*" (pwd)))
+
+(global-set-key (kbd "C-x p s") 'rc/rgrep-selected)

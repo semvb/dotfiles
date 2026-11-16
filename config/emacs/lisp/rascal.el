@@ -167,6 +167,94 @@ strings by `rascal-syntax-propertize'.")
     (indent-line-to target)
     (when (> offset 0) (forward-char offset))))
 
+;;;; Top-level declarations (C-M-a, C-M-e, C-M-h)
+
+;; Emacs's default treats only a "(" in column 0 as the start of a
+;; definition, so C-M-h in Rascal code jumped to the top of the file.
+;; Here a declaration starts at a line with code in column 0, outside any
+;; braces, where the code before it ended with ";" or "}" (or is the
+;; module header).  Tags such as @synopsis{...} belong to the declaration
+;; after them.
+
+(defun rascal--after-tag-p ()
+  "Non-nil if the code just before point ends with a tag @name{...}."
+  (save-excursion
+    (and (eq (char-before) ?})
+         (condition-case nil
+             (progn (backward-sexp)
+                    (skip-chars-backward " \t")
+                    (looking-back "@[[:alnum:]_:]+" (line-beginning-position)))
+           (scan-error nil)))))
+
+(defun rascal--defun-start-p ()
+  "Non-nil if point, at the start of a line, begins a top-level declaration."
+  (and (bolp)
+       (looking-at "[^ \t\n}*/)]")
+       (let ((ppss (syntax-ppss)))
+         (and (zerop (car ppss)) (not (nth 8 ppss))))
+       (save-excursion
+         (forward-comment (- (point)))
+         (or (bobp)
+             (and (memq (char-before) '(?\; ?}))
+                  (not (rascal--after-tag-p)))
+             (progn (beginning-of-line) (looking-at "module\\_>"))))))
+
+(defun rascal-beginning-of-defun (&optional arg)
+  "Move to the start of the ARGth top-level declaration before point.
+With negative ARG, move forward.  Return non-nil if one was found."
+  (setq arg (or arg 1))
+  (let ((found nil))
+    (if (> arg 0)
+        (dotimes (_ arg)
+          (setq found nil)
+          (unless (bolp)
+            (beginning-of-line)
+            (setq found (rascal--defun-start-p)))
+          (while (and (not found) (not (bobp)))
+            (forward-line -1)
+            (setq found (rascal--defun-start-p))))
+      (dotimes (_ (- arg))
+        (setq found nil)
+        (while (and (not found) (zerop (forward-line 1)) (not (eobp)))
+          (setq found (rascal--defun-start-p)))))
+    found))
+
+(defun rascal-end-of-defun ()
+  "Move from the start of a declaration to just after its end.
+A declaration ends at a top-level \";\" or after its {...} body."
+  (condition-case nil
+      (let ((done nil))
+        (while (not done)
+          (forward-comment (buffer-size))
+          (cond ((eobp) (setq done t))
+                ((eq (char-after) ?\;) (forward-char) (setq done t))
+                ((eq (char-after) ?{)
+                 (let ((tag (looking-back "@[[:alnum:]_:]+[ \t]*"
+                                          (line-beginning-position))))
+                   (forward-sexp)
+                   (unless tag (setq done t))))
+                ;; Whitespace or punctuation (honouring the string fences
+                ;; that `rascal-syntax-propertize' puts on |...| and /.../).
+                ((memq (syntax-class (syntax-after (point))) '(0 1))
+                 (forward-char))
+                (t (forward-sexp)))))
+    (scan-error (goto-char (point-max)))))
+
+;;;; Completion (company)
+
+;; The Rascal language server has no completion, so Eglot offers none.
+;; With company, complete from words in open Rascal buffers and from
+;; Rascal's keywords instead.
+(with-eval-after-load 'company
+  (defvar company-keywords-alist)
+  (add-to-list 'company-keywords-alist
+               (cons 'rascal-mode (append rascal--keywords rascal--types))))
+
+(defun rascal--setup-company ()
+  (when (boundp 'company-backends)
+    (setq-local company-backends
+                '((company-dabbrev-code company-keywords) company-files))))
+
 (defvar rascal-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-z") #'rascal-repl)
@@ -183,7 +271,10 @@ strings by `rascal-syntax-propertize'.")
   (setq-local font-lock-defaults '(rascal-font-lock-keywords))
   (setq-local syntax-propertize-function #'rascal-syntax-propertize)
   (setq-local indent-line-function #'rascal-indent-line)
-  (setq-local electric-indent-chars (append "{}()" electric-indent-chars)))
+  (setq-local electric-indent-chars (append "{}()" electric-indent-chars))
+  (setq-local beginning-of-defun-function #'rascal-beginning-of-defun)
+  (setq-local end-of-defun-function #'rascal-end-of-defun)
+  (rascal--setup-company))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.rsc\\'" . rascal-mode))
@@ -341,8 +432,12 @@ added later, start a new REPL."
 ;; trailing slash).
 (defconst rascal--repl-register-helpers
   '("import IO;"
-    "map[loc,loc] rascalElWalk(loc p, loc l) { map[loc,loc] m = (l : p); if (isDirectory(p)) { m[l[path = l.path + \"/\"]] = p; for (str e <- listEntries(p)) m += rascalElWalk(p + e, l + e); } return m; }"
-    "void rascalElRegister(str name, loc root) { map[loc,loc] m = rascalElWalk(root, |project://<name>/|); m[|project://<name>|] = root; registerLocations(\"project\", name, m); }")
+    "import String;"
+    "import Map;"
+    ;; Hidden entries (.git, .idea, ...) are skipped: a .git folder can
+    ;; hold tens of thousands of files and make registration very slow.
+    "map[loc,loc] rascalElWalk(loc p, loc l) { map[loc,loc] m = (l : p); if (isDirectory(p)) { m[l[path = l.path + \"/\"]] = p; for (str e <- listEntries(p), !startsWith(e, \".\")) m += rascalElWalk(p + e, l + e); } return m; }"
+    "void rascalElRegister(str name, loc root) { map[loc,loc] m = rascalElWalk(root, |project://<name>/|); m[|project://<name>|] = root; registerLocations(\"project\", name, m); println(\"Registered |project://<name>/| (<size(m)> locations)\"); }")
   "Rascal definitions sent to the REPL, one command per line.")
 
 (defun rascal--file-loc (dir)

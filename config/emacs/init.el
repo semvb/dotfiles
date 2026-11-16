@@ -10,6 +10,7 @@
 ;; Custom file
 (setq custom-file "~/.config/emacs/custom.el")
 
+
 ;; Helper configurations
 (load "~/.config/emacs/.emacs.rc/rc.el")
 (load "~/.config/emacs/.emacs.rc/misc-rc.el")
@@ -39,25 +40,23 @@
 
 (show-paren-mode 1)
 (electric-pair-mode 1)
-(setq electric-pair-open-newline-between-pairs t)
 
 (setq auto-save-default t)
 
-;; Smooth scrolling with a touchpad or mouse wheel (Emacs 29+, GUI only)
-(pixel-scroll-precision-mode 1)
+(setq vc-follow-symlinks t)
 
-;; Scroll a fixed amount per wheel step instead of speeding up
-(setq mouse-wheel-progressive-speed nil)
+
+;; Scrolling
+(pixel-scroll-precision-mode 1)
+(setq mouse-wheel-progressive-speed nil
+      scroll-conservatively 101
+      scroll-margin 0
+      make-cursor-line-fully-visible nil)
 
 
 ;; Startup
 (setq inhibit-startup-screen t)
 (set-face-attribute 'default nil :height 160)
-
-;;; Open Dired in this directory at startup
-;; (add-hook 'emacs-startup-hook
-;;           (lambda ()
-;;             (dired "~/University/")))
 
 
 ;; Zoom
@@ -79,6 +78,29 @@
 (add-hook 'before-save-hook 'delete-trailing-whitespace)
 
 
+;; Marking
+;; C-g with an active region: go back to where the cursor was when the region started
+(defvar-local my/region-origin nil
+  "Marker at the position the cursor had when the region was activated.")
+(defvar-local my/pre-command-point nil)
+
+(defun my/record-pre-command-point ()
+  (unless (region-active-p)
+    (setq my/pre-command-point (point))))
+(add-hook 'pre-command-hook #'my/record-pre-command-point)
+
+(defun my/save-region-origin ()
+  (setq my/region-origin (copy-marker (or my/pre-command-point (point)))))
+(add-hook 'activate-mark-hook #'my/save-region-origin)
+
+(defun my/return-to-region-origin (&rest _)
+  (when (and (region-active-p)
+             (markerp my/region-origin)
+             (eq (marker-buffer my/region-origin) (current-buffer)))
+    (goto-char my/region-origin)))
+(advice-add 'keyboard-quit :before #'my/return-to-region-origin)
+
+
 ;; Pasting/copying
 
 ;;; Paste over current selected text
@@ -94,7 +116,6 @@
 (global-set-key (kbd "C-c l") 'copy-current-line)
 
 ;;; Deletion without affecting clipboard
-
 (defun my/delete-backward-word ()
   "Delete the previous word without adding it to the kill ring."
   (interactive)
@@ -124,6 +145,16 @@
 (global-set-key (kbd "M-<backspace>") #'my/delete-backward-word)
 (global-set-key (kbd "M-d") #'my/delete-forward-word)
 
+(defun my/kill-ring-save-keep-region (beg end)
+  "Copy the region but keep it active."
+  (interactive "r")
+  (let ((deactivate-mark nil))
+    (kill-ring-save beg end))
+  (setq deactivate-mark nil)
+  (setq mark-active t))
+
+(global-set-key (kbd "M-w") #'my/kill-ring-save-keep-region)
+
 
 ;; Indentation
 (setq-default indent-tabs-mode nil)
@@ -136,6 +167,7 @@
 
 ;;; Keep electric-indent-mode enabled for auto-indentation
 (electric-indent-mode 1)
+(setq electric-pair-open-newline-between-pairs t)
 
 
 ;; Dired
@@ -152,6 +184,8 @@
         (start-process "pdf-browser" nil "xdg-open" file)
       (dired-find-file))))
 
+(setq dired-dwim-target t)
+
 (with-eval-after-load 'dired
   (define-key dired-mode-map (kbd "RET") #'my/dired-open-file))
 
@@ -161,28 +195,11 @@
 (ido-everywhere 1)
 
 
-;; Corfu in-buffer completion
-(rc/require 'corfu)
+;;; Company
+(rc/require 'company)
+(require 'company)
 
-(setq global-corfu-modes
-      '(not shell-mode
-            eshell-mode
-            text-mode
-            compilation-mode
-            comint-mode
-            haskell-interactive-mode))
-(global-corfu-mode 1)
-
-(setq corfu-auto #'corfu-auto--not-in-comment
-      corfu-auto t
-      corfu-auto-delay 0.6
-      corfu-auto-prefix 1
-      corfu-cycle t
-      corfu-quit-at-boundary 'separator
-      corfu-quit-no-match 'separator)
-
-;; (define-key corfu-map (kbd "TAB") #'corfu-complete)
-;; (define-key corfu-map (kbd "<tab>") #'corfu-complete)
+(global-company-mode)
 
 
 ;; C/C++-mode
@@ -267,16 +284,6 @@
 
 (setq compilation-scroll-output 'first-error)
 
-;;; Set default compilation command per directory
-(defun my-set-compile-command ()
-  (cond
-   ((string-match (expand-file-name "~/Uni/Year_3/compiler-construction/") (expand-file-name default-directory))
-    (setq-local compile-command "cd ~/Uni/Year_3/compiler-construction/ && make -C build-debug/ && build-debug/civicc test/parse_test.cvc"))
-   (t
-    (setq-local compile-command "make"))))
-
-(add-hook 'prog-mode-hook 'my-set-compile-command)
-
 ;;; Focus on compilation buffer is compilation threw errors (warnings are ignored)
 (defun my-switch-to-compilation-buffer-on-failure (buffer string)
   (when (and (string-match ".*exited abnormally.*" string)
@@ -284,19 +291,6 @@
     (switch-to-buffer-other-window buffer)))
 
 (add-hook 'compilation-finish-functions 'my-switch-to-compilation-buffer-on-failure)
-
-;;; Close compilation window
-(defun my/kill-compilation-window ()
-  (interactive)
-  (when-let ((buf (get-buffer "*compilation*")))
-    (when (get-buffer-window buf)
-      (delete-window (get-buffer-window buf)))))
-
-(global-set-key (kbd "C-x c") 'my/kill-compilation-window)
-
-
-;; Civic files
-(add-to-list 'auto-mode-alist '("\\.cvc\\'" . c-mode))
 
 
 ;; Markdown
